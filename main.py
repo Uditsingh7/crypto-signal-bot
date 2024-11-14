@@ -2,7 +2,6 @@
 import pandas as pd
 from sqlalchemy import create_engine
 from config import DATABASE_CONFIG
-
 # Step 1: Database connection function using SQLAlchemy
 def connect_to_db():
     try:
@@ -116,6 +115,47 @@ def calculate_atr(df, period=14):
     df['ATR'] = df['TR'].rolling(window=period).mean()
     return df
 
+def calculate_adx(df, period=14):
+    # Calculate Directional Movements
+    df['UpMove'] = df['value_usd'].diff().apply(lambda x: x if x > 0 else 0)
+    df['DownMove'] = -df['value_usd'].diff().apply(lambda x: x if x < 0 else 0)
+    
+    # Smooth the directional movements
+    df['+DM'] = df['UpMove'].rolling(window=period).sum()
+    df['-DM'] = df['DownMove'].rolling(window=period).sum()
+
+    # Calculate True Range (TR)
+    df['TR'] = df['value_usd'].diff().abs()  # Using absolute price change as a proxy for TR
+
+    # Smooth True Range and Directional Indicators
+    df['TR'] = df['TR'].rolling(window=period).sum()
+    df['+DI'] = 100 * (df['+DM'] / df['TR'])
+    df['-DI'] = 100 * (df['-DM'] / df['TR'])
+
+    # Calculate Directional Index and ADX
+    df['DX'] = (df['+DI'] - df['-DI']).abs() / (df['+DI'] + df['-DI']) * 100
+    df['ADX'] = df['DX'].rolling(window=period).mean()  # ADX as the smoothed DX
+
+    return df
+
+def calculate_mfi(df, period=14):
+    # Calculate the Price Change
+    df['Price_Change'] = df['value_usd'].diff()
+
+    # Calculate Raw Money Flow (Price Change x Volume)
+    df['Raw_Money_Flow'] = df['Price_Change'] * df['twenty_four_hour_trading_volume_usd']
+
+    # Separate positive and negative money flows
+    positive_flow = df['Raw_Money_Flow'].apply(lambda x: x if x > 0 else 0)
+    negative_flow = df['Raw_Money_Flow'].apply(lambda x: -x if x < 0 else 0)
+
+    # Calculate Money Flow Ratio
+    money_flow_ratio = positive_flow.rolling(window=period).sum() / negative_flow.rolling(window=period).sum()
+
+    # Calculate MFI
+    df['MFI'] = 100 - (100 / (1 + money_flow_ratio))
+    return df
+
 
 
 # Step 3: Calculate Indicators Efficiently
@@ -166,13 +206,18 @@ def calculate_indicators(df):
     # Calculate ATR for volatility analysis
     df = calculate_atr(df)  # Adds ATR to the DataFrame
 
-    # Generate signal based on indicators (with ATR consideration)
+    df = calculate_adx(df)  # Adds ADX to the DataFrame
+
+    df = calculate_mfi(df)  # Adds MFI to the DataFrame
+
+    # Generate signal based on indicators (including MFI consideration)
     df['signal'] = df.apply(generate_signal, axis=1)
     
     # Return the latest row with calculated indicators and signal
     latest_signal = df.iloc[-1][[
         'recorded_at', 'value_usd', 'SMA_100', 'SMA_200', 'EMA_50', 'EMA_100',
-        'RSI', 'MACD', 'MACD_Signal', 'Bollinger_Upper', 'Bollinger_Lower', 'OBV', 'OBV_MA', 'ATR', 'signal'
+        'RSI', 'MACD', 'MACD_Signal', 'Bollinger_Upper', 'Bollinger_Lower', 
+        'OBV', 'OBV_MA', 'ATR', 'ADX', 'MFI', 'signal'
     ]]
     return latest_signal
 
@@ -194,25 +239,33 @@ def generate_signal(row):
     # OBV trend check: comparing OBV to its 14-day moving average
     obv_signal = 'Bullish' if row['OBV'] > row['OBV_MA'] else 'Bearish'
 
-    # Volatility check using ATR: Define high volatility as ATR > 2% of current price
-    high_volatility = row['ATR'] > row['value_usd'] * 0.02
+    # ADX trend strength check
+    trend_strength = "Strong" if row['ADX'] >= 25 else "Weak"
 
-    # Combine signals for a more reliable indicator with ATR consideration
-    if macd_signal == 'Bullish' and rsi_signal not in ['Overbought', 'Bearish Bias'] and obv_signal == 'Bullish':
-        return 'Strong Bullish - High Volatility' if high_volatility else 'Strong Bullish'
-    elif macd_signal == 'Bearish' and rsi_signal not in ['Oversold', 'Bullish Bias'] and obv_signal == 'Bearish':
-        return 'Strong Bearish - High Volatility' if high_volatility else 'Strong Bearish'
-    elif rsi_signal == 'Overbought' or (row['value_usd'] > row['Bollinger_Upper']):
+    # MFI check for overbought or oversold conditions
+    mfi_signal = 'Neutral'
+    if row['MFI'] > 80:
+        mfi_signal = 'Overbought'
+    elif row['MFI'] < 20:
+        mfi_signal = 'Oversold'
+
+    # Combine signals for a more reliable indicator with MFI consideration
+    if macd_signal == 'Bullish' and rsi_signal not in ['Overbought', 'Bearish Bias'] and obv_signal == 'Bullish' and trend_strength == "Strong" and mfi_signal != 'Overbought':
+        return 'Strong Bullish'
+    elif macd_signal == 'Bearish' and rsi_signal not in ['Oversold', 'Bullish Bias'] and obv_signal == 'Bearish' and trend_strength == "Strong" and mfi_signal != 'Oversold':
+        return 'Strong Bearish'
+    elif rsi_signal == 'Overbought' or mfi_signal == 'Overbought' or (row['value_usd'] > row['Bollinger_Upper']):
         return 'Overbought - Potential Reversal'
-    elif rsi_signal == 'Oversold' or (row['value_usd'] < row['Bollinger_Lower']):
+    elif rsi_signal == 'Oversold' or mfi_signal == 'Oversold' or (row['value_usd'] < row['Bollinger_Lower']):
         return 'Oversold - Potential Reversal'
+    elif trend_strength == "Weak":
+        return 'Hold - Weak Trend'
     elif macd_signal == 'Bullish' and obv_signal == 'Bullish':
-        return 'Bullish - High Volatility' if high_volatility else 'Bullish'
+        return 'Bullish'
     elif macd_signal == 'Bearish' and obv_signal == 'Bearish':
-        return 'Bearish - High Volatility' if high_volatility else 'Bearish'
+        return 'Bearish'
     else:
         return 'Hold'
-
 
 
 
@@ -252,16 +305,19 @@ def predict_price(df, days=7):
     # ATR-based adjustment for volatility sensitivity
     atr_multiplier = 1 + (latest['ATR'] / latest['value_usd'])
 
-    # Apply ATR multiplier to increase or decrease prediction range based on volatility
-    if latest['ATR'] > latest['value_usd'] * 0.02:  # High volatility
-        prediction *= atr_multiplier * days_multiplier
-    else:  # Low volatility, apply minimal ATR adjustment
-        prediction *= 0.995 * days_multiplier if latest['value_usd'] > latest['Bollinger_Lower'] else 1 / atr_multiplier
+    # ADX adjustment for trend strength
+    if latest['ADX'] >= 25:  # Strong trend
+        prediction *= atr_multiplier * days_multiplier  # Confidence in the trend, so apply ATR and days_multiplier fully
+    else:  # Weak trend
+        prediction *= 0.98 * days_multiplier  # Slightly conservative if trend is weak
+
+    # MFI adjustment for overbought/oversold conditions
+    if latest['MFI'] > 80:
+        prediction *= 0.97  # Slightly decrease if MFI indicates overbought
+    elif latest['MFI'] < 20:
+        prediction *= 1.03  # Slightly increase if MFI indicates oversold
 
     return round(prediction, 2)
-
-
-
 
 # Step 5: Main function to get signals for each coin
 def main():
