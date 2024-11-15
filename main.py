@@ -3,6 +3,8 @@ import pandas as pd
 from sqlalchemy import create_engine
 from config import DATABASE_CONFIG
 import requests
+import talib
+import numpy as np
 # Step 1: Database connection function using SQLAlchemy
 def connect_to_db():
     try:
@@ -194,14 +196,20 @@ def calculate_indicators(df):
         print("Insufficient data for reliable indicator calculation.")
         return None
 
-    # Calculate liquidity category
+    # Cache reusable calculations
+    rolling_50 = df['value_usd'].rolling(window=50)
+    rolling_100 = df['value_usd'].rolling(window=100)
+    rolling_200 = df['value_usd'].rolling(window=200)
+    rolling_20 = df['value_usd'].rolling(window=20)
+
+    # Liquidity category
     latest_volume = df['twenty_four_hour_trading_volume_usd'].iloc[-1]
     liquidity_category = categorize_by_volume(latest_volume)
 
     # Simple Moving Averages (SMA)
-    df['SMA_50'] = df['value_usd'].rolling(window=50).mean()
-    df['SMA_100'] = df['value_usd'].rolling(window=100).mean()
-    df['SMA_200'] = df['value_usd'].rolling(window=200).mean()
+    df['SMA_50'] = rolling_50.mean()
+    df['SMA_100'] = rolling_100.mean()
+    df['SMA_200'] = rolling_200.mean()
 
     # Exponential Moving Averages (EMA)
     df['EMA_50'] = df['value_usd'].ewm(span=50, adjust=False).mean()
@@ -209,12 +217,13 @@ def calculate_indicators(df):
     df['EMA_20'] = df['value_usd'].ewm(span=20, adjust=False).mean()
 
     # VWAP
-    df['VWAP'] = (df['value_usd'] * df['twenty_four_hour_trading_volume_usd']).cumsum() / df['twenty_four_hour_trading_volume_usd'].cumsum()
+    cumulative_volume = df['twenty_four_hour_trading_volume_usd'].cumsum()
+    df['VWAP'] = (df['value_usd'] * df['twenty_four_hour_trading_volume_usd']).cumsum() / cumulative_volume
 
     # MACD and Signal Line
-    df['EMA_12'] = df['value_usd'].ewm(span=12, adjust=False).mean()
-    df['EMA_26'] = df['value_usd'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = df['EMA_12'] - df['EMA_26']
+    ema_12 = df['value_usd'].ewm(span=12, adjust=False).mean()
+    ema_26 = df['value_usd'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema_12 - ema_26
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
     # RSI Calculation
@@ -227,10 +236,10 @@ def calculate_indicators(df):
     df['RSI'] = 100 - (100 / (1 + rs)).fillna(50)
 
     # Bollinger Bands
-    rolling_mean = df['value_usd'].rolling(window=20).mean()
-    rolling_std = df['value_usd'].rolling(window=20).std()
-    df['Bollinger_Upper'] = rolling_mean + (2 * rolling_std)
-    df['Bollinger_Lower'] = rolling_mean - (2 * rolling_std)
+    rolling_mean_20 = rolling_20.mean()
+    rolling_std_20 = rolling_20.std()
+    df['Bollinger_Upper'] = rolling_mean_20 + (2 * rolling_std_20)
+    df['Bollinger_Lower'] = rolling_mean_20 - (2 * rolling_std_20)
 
     # OBV and its moving average
     df['OBV'] = (df['twenty_four_hour_trading_volume_usd'] *
@@ -238,7 +247,7 @@ def calculate_indicators(df):
     df['OBV_MA'] = df['OBV'].rolling(window=14).mean()
 
     # ATR and ADX
-    df = calculate_atr(df)
+    df = calculate_atr(df)  # Assuming these functions are already defined
     df = calculate_adx(df)
 
     # MFI
@@ -253,10 +262,11 @@ def calculate_indicators(df):
         'RSI', 'MACD', 'MACD_Signal', 'Bollinger_Upper', 'Bollinger_Lower',
         'OBV', 'OBV_MA', 'ATR', 'ADX', 'MFI', 'VWAP', 'signal'
     ]].to_dict()
-    
+
     latest_signal['Liquidity'] = liquidity_category  # Add liquidity category to the result
-    
+
     return latest_signal
+
 
 def generate_signal(row):
     # Define thresholds for RSI and MFI
