@@ -3,8 +3,9 @@ import pandas as pd
 from sqlalchemy import create_engine
 from config import DATABASE_CONFIG
 import requests
-import talib
+# import talib
 import numpy as np
+import json
 # Step 1: Database connection function using SQLAlchemy
 def connect_to_db():
     try:
@@ -354,7 +355,9 @@ def predict_price(df, days=7):
 
 # Step 5: Main function to get signals for each coin
 def main():
-    coin_symbols = ['btc']  # Add your desired coin symbols here
+    coin_symbols = ['btc', 'eth', 'sol', 'xrp', 'bnb', 'ton', 'doge', 'ada', 'shib']  # Add your desired coin symbols here
+    crypto_predictions = []
+
     for coin_symbol in coin_symbols:
         print(f"\nFetching data for {coin_symbol.upper()}")
         df = fetch_coin_data(coin_symbol)
@@ -364,20 +367,53 @@ def main():
                 print(f"Latest Signal for {coin_symbol.upper()}:")
                 print(result)
                 
-                # Generate and display the 1-day price prediction
+                # Generate price predictions
                 predicted_24h_price = predict_price(df, days=1)
-                print(f"Predicted 24-hour price: {coin_symbol.upper()}: {predicted_24h_price}")            
-                # Generate and display the 7-day price prediction
                 predicted_7d_price = predict_price(df, days=7)
-                print(f"Predicted 7-day price for {coin_symbol.upper()}: {predicted_7d_price}")
-                
-                # Generate and display the 14-day price prediction
                 predicted_14d_price = predict_price(df, days=14)
-                print(f"Predicted 14-day price for {coin_symbol.upper()}: {predicted_14d_price}")
+
+                # Map data to frontend format
+                prediction_data = {
+                    "coin": coin_symbol.capitalize(),
+                    "symbol": coin_symbol.upper(),
+                    "currentPrice": result["value_usd"],
+                    "sentiment": result["signal"],  # Use signal as sentiment
+                    "marketCondition": result["signal"],  # Use signal as market condition
+                    "sevenDayPrediction": round(result["value_usd"] * (1 + predicted_7d_price / 100), 2),
+                    "fourteenDayPrediction": round(result["value_usd"] * (1 + predicted_14d_price / 100), 2),
+                    "tradingVolume": result.get("Liquidity", "Unknown"),  # Placeholder if Liquidity is not calculated
+                    "keyEvents": "Harvest 2.0",  # Placeholder for actual events
+                    "technicalIndicators": {
+                        "SMA_50": round(result["SMA_50"], 2),
+                        "SMA_100": round(result["SMA_100"], 2),
+                        "SMA_200": round(result["SMA_200"], 2),
+                        "EMA_50": round(result["EMA_50"], 2),
+                        "EMA_100": round(result["EMA_100"], 2),
+                        "EMA_20": round(result["EMA_20"], 2),
+                        "RSI": round(result["RSI"], 2),
+                        "MACD": round(result["MACD"], 2),
+                        "MACD_Signal": round(result["MACD_Signal"], 2),
+                        "Bollinger_Upper": round(result["Bollinger_Upper"], 2),
+                        "Bollinger_Lower": round(result["Bollinger_Lower"], 2),
+                        "OBV": round(result["OBV"], 2),
+                        "OBV_MA": round(result["OBV_MA"], 2),
+                        "ATR": round(result["ATR"], 2),
+                        "ADX": round(result["ADX"], 2),
+                        "MFI": round(result["MFI"], 2),
+                        "VWAP": round(result["VWAP"], 2),
+                        "Predicted_24h_Price_Change_Percentage": predicted_24h_price
+                    }
+                }
+                crypto_predictions.append(prediction_data)
             else:
                 print(f"Calculation error for {coin_symbol.upper()}")
         else:
             print(f"Not enough data to calculate indicators for {coin_symbol.upper()}")
+
+    # Convert the predictions to JSON format
+    output_json = json.dumps(crypto_predictions, indent=2)
+    print("\nFormatted Output for Frontend:")
+    print(output_json)
 
 
 if __name__ == "__main__":
