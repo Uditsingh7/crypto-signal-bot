@@ -95,7 +95,7 @@ def calculate_moving_averages(df):
 # Step 2: Fetch data for a specific coin
 def fetch_coin_data(coin_symbol):
     query = """
-    SELECT cp.recorded_at, cp.value_usd, cp.twenty_four_hour_trading_volume_usd
+    SELECT cp.recorded_at, cp.value_usd, cp.twenty_four_hour_trading_volume_usd, c.image_url, c.name
     FROM coin_prices_daily cp
     JOIN coins c ON c.id = cp.coin_id
     WHERE c.symbol = %s
@@ -255,19 +255,19 @@ def calculate_indicators(df):
     df = calculate_mfi(df)
 
     # Generate signal
-    df['signal'] = df.apply(generate_signal, axis=1)
+    # Apply the generate_signal function to each row and expand the dictionary into separate columns
+    df[['sentiment', 'marketCondition']] = df.apply(lambda row: pd.Series(generate_signal(row)), axis=1)
 
     # Return the latest row with indicators and signal
     latest_signal = df.iloc[-1][[
         'recorded_at', 'value_usd', 'SMA_50', 'SMA_100', 'SMA_200', 'EMA_50', 'EMA_100', 'EMA_20',
         'RSI', 'MACD', 'MACD_Signal', 'Bollinger_Upper', 'Bollinger_Lower',
-        'OBV', 'OBV_MA', 'ATR', 'ADX', 'MFI', 'VWAP', 'signal'
+        'OBV', 'OBV_MA', 'ATR', 'ADX', 'MFI', 'VWAP', 'sentiment', 'marketCondition'
     ]].to_dict()
 
     latest_signal['Liquidity'] = liquidity_category  # Add liquidity category to the result
 
     return latest_signal
-
 
 def generate_signal(row):
     # Define thresholds for RSI and MFI
@@ -294,23 +294,34 @@ def generate_signal(row):
     # EMA crossover signal (20-day and 50-day)
     ema_crossover_signal = 'Bullish' if row['EMA_20'] > row['EMA_50'] else 'Bearish'
 
-    # Combined Signal
+    # Market Sentiment (Bullish, Bearish, Hold)
     if macd_signal == 'Bullish' and rsi_signal not in ['Overbought'] and obv_signal == 'Bullish' and trend_strength == "Strong" and mfi_signal != 'Overbought' and vwap_signal == 'Above' and ema_crossover_signal == 'Bullish':
-        return 'Strong Bullish'
+        sentiment = 'Strong Bullish'
     elif macd_signal == 'Bearish' and rsi_signal not in ['Oversold'] and obv_signal == 'Bearish' and trend_strength == "Strong" and mfi_signal != 'Oversold' and vwap_signal == 'Below' and ema_crossover_signal == 'Bearish':
-        return 'Strong Bearish'
-    elif rsi_signal == 'Overbought' or mfi_signal == 'Overbought' or (row['value_usd'] > row['Bollinger_Upper']):
-        return 'Overbought - Potential Reversal'
-    elif rsi_signal == 'Oversold' or mfi_signal == 'Oversold' or (row['value_usd'] < row['Bollinger_Lower']):
-        return 'Oversold - Potential Reversal'
-    elif trend_strength == "Weak":
-        return 'Hold - Weak Trend'
+        sentiment = 'Strong Bearish'
     elif macd_signal == 'Bullish' and obv_signal == 'Bullish':
-        return 'Bullish'
+        sentiment = 'Bullish'
     elif macd_signal == 'Bearish' and obv_signal == 'Bearish':
-        return 'Bearish'
+        sentiment = 'Bearish'
+    elif trend_strength == "Weak":
+        sentiment = 'Hold'
     else:
-        return 'Hold'
+        sentiment = 'Hold'  # Default to Hold if none of the above conditions are met
+
+    # Market Condition (Overbought, Oversold, Neutral)
+    if rsi_signal == 'Overbought' or mfi_signal == 'Overbought' or (row['value_usd'] > row['Bollinger_Upper']):
+        market_condition = 'Overbought - Potential Reversal'
+    elif rsi_signal == 'Oversold' or mfi_signal == 'Oversold' or (row['value_usd'] < row['Bollinger_Lower']):
+        market_condition = 'Oversold - Potential Reversal'
+    else:
+        market_condition = 'Neutral'
+
+    return {
+        "sentiment": sentiment,
+        "marketCondition": market_condition
+    }
+
+
 
 def predict_price(df, days=7):
     latest = df.iloc[-1]
@@ -355,10 +366,14 @@ def predict_price(df, days=7):
 
 # Step 5: Main function to get signals for each coin
 def main():
-    coin_symbols = ['btc', 'eth', 'sol', 'xrp', 'bnb', 'ton', 'doge', 'ada', 'shib']  # Add your desired coin symbols here
+    coin_symbols = ['btc', 'eth', 'sol', 'xrp', 'bnb', 'ton', 'doge', 'ada', 'shib', 'trx', 'avax', 'sui', 'link', 'pepe', 'dot', 'tao', 'apt', 'spec', 'om',
+                    'render', 'ar', 'near', 'super', 'aero', 'uni', 'neural', 'chex', 'cpool', 'fantom', 'ondo', 'beam', 'grass',
+                   'ray', 'jup'                   
+                    ] 
+    # coin_symbols = ['btc']
     crypto_predictions = []
 
-    for coin_symbol in coin_symbols:
+    for coin_symbol in coin_symbols: 
         print(f"\nFetching data for {coin_symbol.upper()}")
         df = fetch_coin_data(coin_symbol)
         if df is not None and len(df) >= 200:
@@ -374,11 +389,12 @@ def main():
 
                 # Map data to frontend format
                 prediction_data = {
-                    "coin": coin_symbol.capitalize(),
+                    "coin": df["name"].iloc[0],
                     "symbol": coin_symbol.upper(),
+                    "imageUrl": df["image_url"].iloc[0],
                     "currentPrice": result["value_usd"],
-                    "sentiment": result["signal"],  # Use signal as sentiment
-                    "marketCondition": result["signal"],  # Use signal as market condition
+                    "sentiment": result["sentiment"],  # Use signal as sentiment
+                    "marketCondition": result["marketCondition"],  # Use signal as market condition
                     "sevenDayPrediction": round(result["value_usd"] * (1 + predicted_7d_price / 100), 2),
                     "fourteenDayPrediction": round(result["value_usd"] * (1 + predicted_14d_price / 100), 2),
                     "tradingVolume": result.get("Liquidity", "Unknown"),  # Placeholder if Liquidity is not calculated
@@ -410,10 +426,14 @@ def main():
         else:
             print(f"Not enough data to calculate indicators for {coin_symbol.upper()}")
 
-    # Convert the predictions to JSON format
+    # Convert the predictions to JSON format and save to a file
     output_json = json.dumps(crypto_predictions, indent=2)
-    print("\nFormatted Output for Frontend:")
-    print(output_json)
+    
+    # Save the output to a file
+    with open("crypto_predictions.json", "w") as json_file:
+        json_file.write(output_json)
+
+    print("\nThe predictions have been saved to 'crypto_predictions.json'.")
 
 
 if __name__ == "__main__":
