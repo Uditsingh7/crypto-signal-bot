@@ -160,18 +160,6 @@ def calculate_mfi(df, period=14):
     df['MFI'] = 100 - (100 / (1 + money_flow_ratio))
     return df
 
-
-
-def get_fear_greed_index():
-    url = "https://api.alternative.me/fng/"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        return int(data['data'][0]['value'])  # Returns current index (0-100)
-    else:
-        print("Failed to fetch Fear & Greed Index")
-        return None
-    
 def categorize_by_volume(volume):
     """
     Categorizes a coin based on its 24-hour trading volume.
@@ -185,8 +173,40 @@ def categorize_by_volume(volume):
         return 'Medium Liquidity'
     else:
         return 'Low Liquidity'
+def calculate_rsi(df):
+    """
+    Calculate the Relative Strength Index (RSI).
+    """
+    delta = df['value_usd'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14).mean().fillna(0)
+    avg_loss = loss.rolling(window=14).mean().fillna(0)
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    return df
 
-    
+def adjust_for_small_dataset(df):
+    """
+    Adjust window lengths dynamically for small datasets.
+    """
+    max_len = len(df)
+    df['SMA_50'] = df['value_usd'].rolling(window=min(max_len, 50)).mean()
+    df['SMA_100'] = df['value_usd'].rolling(window=min(max_len, 100)).mean()
+    df['SMA_200'] = df['value_usd'].rolling(window=min(max_len, 200)).mean()
+    return df
+
+
+def get_fear_greed_index():
+    url = "https://api.alternative.me/fng/"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        return int(data['data'][0]['value'])  # Returns current index (0-100)
+    else:
+        print("Failed to fetch Fear & Greed Index")
+        return None
+
 # Step 3: Calculate Indicators Efficiently
 def calculate_indicators(df):
     # Handle missing values
@@ -194,8 +214,8 @@ def calculate_indicators(df):
     df['twenty_four_hour_trading_volume_usd'] = df['twenty_four_hour_trading_volume_usd'].interpolate(method='linear')
 
     if len(df) < 200:
-        print("Insufficient data for reliable indicator calculation.")
-        return None
+        print("Insufficient data for reliable indicator calculation. Using reduced window lengths.")
+        df = adjust_for_small_dataset(df)
 
     # Cache reusable calculations
     rolling_50 = df['value_usd'].rolling(window=50)
@@ -219,6 +239,7 @@ def calculate_indicators(df):
 
     # VWAP
     cumulative_volume = df['twenty_four_hour_trading_volume_usd'].cumsum()
+    cumulative_volume.replace(0, 1e-12, inplace=True)  # Prevent division by zero for small values
     df['VWAP'] = (df['value_usd'] * df['twenty_four_hour_trading_volume_usd']).cumsum() / cumulative_volume
 
     # MACD and Signal Line
@@ -228,48 +249,77 @@ def calculate_indicators(df):
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
     # RSI Calculation
-    delta = df['value_usd'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs)).fillna(50)
+    df = calculate_rsi(df)
 
     # Bollinger Bands
     rolling_mean_20 = rolling_20.mean()
     rolling_std_20 = rolling_20.std()
-    df['Bollinger_Upper'] = rolling_mean_20 + (2 * rolling_std_20)
-    df['Bollinger_Lower'] = rolling_mean_20 - (2 * rolling_std_20)
+    if rolling_std_20.mean() < 0.0000001:  # Adjust for very small prices
+        print("Low price variance detected; assigning default Bollinger Bands.")
+        df['Bollinger_Upper'] = rolling_mean_20 + 1e-6  # Add a small constant to handle low variance
+        df['Bollinger_Lower'] = rolling_mean_20 - 1e-6
+    else:
+        df['Bollinger_Upper'] = rolling_mean_20 + (2 * rolling_std_20)
+        df['Bollinger_Lower'] = rolling_mean_20 - (2 * rolling_std_20)
 
     # OBV and its moving average
-    df['OBV'] = (df['twenty_four_hour_trading_volume_usd'] *
-                 (df['value_usd'].diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)))).cumsum()
-    df['OBV_MA'] = df['OBV'].rolling(window=14).mean()
+    try:
+        df['OBV'] = (df['twenty_four_hour_trading_volume_usd'] *
+                     (df['value_usd'].diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)))).cumsum()
+        df['OBV_MA'] = df['OBV'].rolling(window=14).mean()
+    except Exception as e:
+        print(f"Error calculating OBV: {e}")
+        df['OBV'] = None
+        df['OBV_MA'] = None
 
     # ATR and ADX
-    df = calculate_atr(df)  # Assuming these functions are already defined
-    df = calculate_adx(df)
+    try:
+        df = calculate_atr(df)  # Ensure `calculate_atr` is defined
+    except Exception as e:
+        print(f"Error calculating ATR: {e}")
+        df['ATR'] = None
+
+    try:
+        df = calculate_adx(df)  # Ensure `calculate_adx` is defined
+    except Exception as e:
+        print(f"Error calculating ADX: {e}")
+        df['ADX'] = None
 
     # MFI
-    df = calculate_mfi(df)
+    try:
+        df = calculate_mfi(df)  # Ensure `calculate_mfi` is defined
+    except Exception as e:
+        print(f"Error calculating MFI: {e}")
+        df['MFI'] = None
 
     # Generate signal
-    # Apply the generate_signal function to each row and expand the dictionary into separate columns
-    df[['sentiment', 'marketCondition']] = df.apply(lambda row: pd.Series(generate_signal(row)), axis=1)
+    try:
+        df[['sentiment', 'marketCondition']] = df.apply(lambda row: pd.Series(generate_signal(row)), axis=1)
+    except Exception as e:
+        print(f"Error generating signals: {e}")
+        df['sentiment'] = None
+        df['marketCondition'] = None
 
     # Return the latest row with indicators and signal
-    latest_signal = df.iloc[-1][[
-        'recorded_at', 'value_usd', 'SMA_50', 'SMA_100', 'SMA_200', 'EMA_50', 'EMA_100', 'EMA_20',
-        'RSI', 'MACD', 'MACD_Signal', 'Bollinger_Upper', 'Bollinger_Lower',
-        'OBV', 'OBV_MA', 'ATR', 'ADX', 'MFI', 'VWAP', 'sentiment', 'marketCondition'
-    ]].to_dict()
+    try:
+        latest_signal = df.iloc[-1][[
+            'recorded_at', 'value_usd', 'SMA_50', 'SMA_100', 'SMA_200', 'EMA_50', 'EMA_100', 'EMA_20',
+            'RSI', 'MACD', 'MACD_Signal', 'Bollinger_Upper', 'Bollinger_Lower',
+            'OBV', 'OBV_MA', 'ATR', 'ADX', 'MFI', 'VWAP', 'sentiment', 'marketCondition'
+        ]].to_dict()
+    except KeyError as e:
+        print(f"Error accessing required columns: {e}")
+        latest_signal = {"error": f"Missing required data: {e}"}
 
     latest_signal['Liquidity'] = liquidity_category  # Add liquidity category to the result
 
     return latest_signal
 
+
 def generate_signal(row):
+    """
+    Generate trading signal based on multiple indicators.
+    """
     # Define thresholds for RSI and MFI
     rsi_signal = 'Neutral'
     if row['RSI'] > 80:
@@ -322,7 +372,6 @@ def generate_signal(row):
     }
 
 
-
 def predict_price(df, days=7):
     latest = df.iloc[-1]
     current_price = latest['value_usd']
@@ -331,9 +380,9 @@ def predict_price(df, days=7):
 
     # Trend and crossover analysis
     if latest['EMA_50'] > latest['EMA_100'] and current_price > latest['SMA_100']:
-        prediction = min(latest['Bollinger_Upper'], current_price * 1.05 * days_multiplier)
+        prediction = min(latest.get('Bollinger_Upper', current_price * 1.05), current_price * 1.05 * days_multiplier)
     elif latest['EMA_50'] < latest['EMA_100'] and current_price < latest['SMA_100']:
-        prediction = max(latest['Bollinger_Lower'], current_price * 0.95 * days_multiplier)
+        prediction = max(latest.get('Bollinger_Lower', current_price * 0.95), current_price * 0.95 * days_multiplier)
 
     # VWAP adjustment
     if current_price > latest['VWAP']:
@@ -342,9 +391,9 @@ def predict_price(df, days=7):
         prediction *= 0.99
 
     # Mean reversion adjustment
-    if latest['RSI'] > 80 or latest['MFI'] > 80 or current_price > latest['Bollinger_Upper']:
+    if latest['RSI'] > 80 or latest['MFI'] > 80 or current_price > latest.get('Bollinger_Upper', current_price):
         prediction = (prediction + latest['SMA_50']) / 2
-    elif latest['RSI'] < 20 or latest['MFI'] < 20 or current_price < latest['Bollinger_Lower']:
+    elif latest['RSI'] < 20 or latest['MFI'] < 20 or current_price < latest.get('Bollinger_Lower', current_price):
         prediction = (prediction + latest['SMA_50']) / 2
 
     # ATR and ADX adjustment
@@ -363,14 +412,13 @@ def predict_price(df, days=7):
 
     return round(percentage_change, 2)
 
-
 # Step 5: Main function to get signals for each coin
 def main():
-    coin_symbols = ['btc', 'eth', 'sol', 'xrp', 'bnb', 'ton', 'doge', 'ada', 'shib', 'trx', 'avax', 'sui', 'link', 'pepe', 'dot', 'tao', 'apt', 'spec', 'om',
-                    'render', 'ar', 'near', 'super', 'aero', 'uni', 'neural', 'chex', 'cpool', 'fantom', 'ondo', 'beam', 'grass',
-                   'ray', 'jup'                   
-                    ] 
-    # coin_symbols = ['btc']
+    coin_symbols = ['btc', 'eth', 'xrp', 'sol', 'bnb', 'ton', 'apt', 'arb', 'tao', 'om', 'render', 'super', 'ondo', 'sui', 
+                    'ar', 'op', 'tia', 'mkr', 'doge', 'ada', 'shib', 'trx', 'avax', 'link', 'pepe', 'dot', 'spec', 'near', 
+                    'aero', 'uni', 'neural', 'chex', 'cpool', 'fantom', 'beam', 'grass', 'ray', 'jup']
+
+    # coin_symbols = ['btc', 'eth', 'shib']
     crypto_predictions = []
 
     for coin_symbol in coin_symbols: 
